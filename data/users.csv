@@ -2,3 +2,6 @@ email,password_hash,role,created_at
 pragnasreenath@gmail.com,,customer,2025-11-09 22:46:17.083179
 pragnasreenat@gmail.com,$2b$12$mJcMOS2yweoiA4mcHLoVKe8Ara5WOt13TO6Ml35nSXilfLgA1VAhS,customer,2025-11-09 23:00:52.550039
 pragnasreena@gmail.com,$2b$12$yPPXId4vBC5AsjMQk7uvZOkxcudLuGJ/7/0VLvKn196.dafTjcpf6,staff,2025-11-09 23:03:13.083916
+pragna@gmail.com,$2b$12$HNxfznWbb2tkVGL8entoJ.IwuztKhZWvh9E4WtHjQiDsV9LhzspF2,staff,2025-11-10 16:34:39.055529
+pragnas,$2b$12$K7WPMEyI3M8VOXUZ8FT8YuDCyikmxZw2UFBeABTMqi3bV4M6kh6Di,staff,2025-11-10 16:36:09.979419
+pragnas@gmail.com,$2b$12$0rS1N3QAiNegGsG2LMdpwuWgRTyNWl5dS4iSuhd4zKZB.AJ.hSwcu,staff,2025-11-10 16:36:50.570609

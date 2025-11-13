@@ -1,1 +1,2 @@
-ticket,email,device,issue,status,created_at
+ticket,email,device_type,device,issue,image_path,preferred_time,scheduled_time,status,contacted,staff_notes,assigned_to,created_at,updated_at
+R-1762773706,pragna@gmail.com,,iphone 13,screen broke,,,,In Progress,False,,,2025-11-10 16:51:46.196766,2025-11-11 07:55:41.750606

@@ -26,7 +26,10 @@ def register(email: str, password: str, role: str = "customer") -> bool:
     ok = store.create_user(email, pw_hash, role)
     return ok
 
-def login(email: str, password: str) -> bool:
+def login(email: str, password: str, expected_role: str | None = None) -> bool:
+    """
+    If expected_role is given, enforce it must match the stored role.
+    """
     if not email or not password:
         return False
     u = store.get_user(email)
@@ -35,20 +38,24 @@ def login(email: str, password: str) -> bool:
     stored = (u.get("password_hash") or "").encode("utf-8")
     if not stored:
         return False
-    if bcrypt.checkpw(password.encode("utf-8"), stored):
-        _set_user(email)
-        return True
-    return False
+    if not bcrypt.checkpw(password.encode("utf-8"), stored):
+        return False
+
+    actual_role = u.get("role", "customer")
+    if expected_role and expected_role != actual_role:
+        return False
+
+    _set_user(email)
+    return True
 
 def update_role(email: str, role: str) -> bool:
     ok = store.set_role(email, role)
     if ok and current_user() and current_user()["email"] == email:
-        # refresh session role if updating self
         _set_user(email)
     return ok
 
 # ---------------------------
-# Guards (import these in pages)
+# Guards
 # ---------------------------
 def require_login():
     """Stop the page if user isn't logged in. Returns the user dict if logged in."""
@@ -69,4 +76,4 @@ def require_role(roles: list[str]):
     return user
 
 def is_staff(user) -> bool:
-    return bool(user and user.get("role") in ("staff", "admin"))
+    return bool(user and user.get("role") == "staff")

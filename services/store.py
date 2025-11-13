@@ -1,3 +1,4 @@
+# services/store.py
 import os
 from typing import Optional, Dict, Any
 import pandas as pd
@@ -29,12 +30,15 @@ FILES = {
 SCHEMAS = {
     "products": [
         "id","name","brand","category","condition","price","stock","warranty_months",
-        "image_path","desc","slug","created_at","updated_at","created_by"
+        "image_path","desc","slug","featured","created_at","updated_at","created_by"
     ],
     "orders": ["order_id","email","status","total","payment_id","payment_method","created_at"],
     "order_items": ["order_id","product_id","qty","price"],
-    "repairs": ["ticket","email","device","issue","status","created_at"],
-    # users now includes password_hash (bcrypt)
+    "repairs": [
+        "ticket","email","device_type","device","issue","image_path",
+        "preferred_time","scheduled_time","status","contacted","staff_notes",
+        "assigned_to","created_at","updated_at"
+    ],
     "users": ["email","password_hash","role","created_at"],
     "sell_requests": [
         "req_id","email","device","brand","condition","exp_price","desc","image_path",
@@ -53,26 +57,59 @@ def _ensure_file(name):
 def _load(name):
     _ensure_file(name)
     df = pd.read_csv(_path(name))
-    # auto-migrate users.csv if password_hash missing (older versions)
-    if name == "users" and "password_hash" not in df.columns:
-        df["password_hash"] = ""
-        if "role" not in df.columns:
-            df["role"] = "customer"
-        if "created_at" not in df.columns:
-            df["created_at"] = datetime.now()
-        df = df[SCHEMAS["users"]]  # reorder
+
+    # ---- migrations / column backfills
+    if name == "users":
+        if "password_hash" not in df.columns: df["password_hash"] = ""
+        if "role" not in df.columns: df["role"] = "customer"
+        if "created_at" not in df.columns: df["created_at"] = datetime.now()
+        df = df[SCHEMAS["users"]]
         df.to_csv(_path("users"), index=False)
+
+    if name == "products":
+        for col, default in [
+            ("featured", False),
+            ("slug", ""),
+            ("created_by", "system"),
+            ("updated_at", datetime.now()),
+            ("created_at", datetime.now()),
+            ("image_path",""),
+            ("warranty_months", 3),
+        ]:
+            if col not in df.columns:
+                df[col] = default
+        df = df[SCHEMAS["products"]]
+        df.to_csv(_path("products"), index=False)
+
+    if name == "repairs":
+        defaults = {
+            "device_type": "",
+            "image_path": "",
+            "preferred_time": "",
+            "scheduled_time": "",
+            "status": "In Progress",
+            "contacted": False,
+            "staff_notes": "",
+            "assigned_to": "",
+            "updated_at": datetime.now(),
+        }
+        for col, default in defaults.items():
+            if col not in df.columns:
+                df[col] = default
+        df = df[SCHEMAS["repairs"]]
+        df.to_csv(_path("repairs"), index=False)
+
     return df
 
 def _save(name, df):
     df.to_csv(_path(name), index=False)
 
-# ---------- Users (password-aware) ----------
+# ---------- Users ----------
 def create_user(email: str, password_hash: str, role: str = "customer") -> bool:
     if not email: return False
     df = _load("users")
     if (df["email"] == email).any():
-        return False  # already exists
+        return False
     new = pd.DataFrame([{
         "email": email,
         "password_hash": password_hash,
@@ -86,9 +123,7 @@ def get_user(email: str) -> Optional[Dict[str, Any]]:
     if not email: return None
     df = _load("users")
     row = df[df["email"] == email]
-    if row.empty: return None
-    r = row.iloc[0].to_dict()
-    return r
+    return None if row.empty else row.iloc[0].to_dict()
 
 def set_role(email: str, role: str) -> bool:
     df = _load("users")
@@ -141,6 +176,7 @@ def add_product(data: Dict[str, Any]) -> int:
         "image_path": data.get("image_path",""),
         "desc": data.get("desc",""),
         "slug": slug,
+        "featured": bool(data.get("featured", False)),
         "created_at": now,
         "updated_at": now,
         "created_by": data.get("created_by","system"),
@@ -183,24 +219,51 @@ def list_products(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
             df = df[df["condition"] == filters["condition"]]
     return df.sort_values("created_at", ascending=False)
 
-# ---------- Orders & Payments ----------
+def list_featured(n: int = 6) -> pd.DataFrame:
+    df = _load("products")
+    if "featured" in df.columns:
+        df = df[df["featured"] == True]  # noqa: E712
+    return df.sort_values("updated_at", ascending=False).head(n)
+
+def list_categories() -> list[str]:
+    df = _load("products")
+    if df.empty: return ["Phone","Laptop","Tablet","Accessory","Other"]
+    cats = [c for c in df["category"].dropna().unique().tolist() if c]
+    base = ["Phone","Laptop","Tablet","Accessory","Other"]
+    out = [c for c in base if c in cats] + [c for c in cats if c not in base]
+    return out or base
+
+# ---------- Orders & Payments (with approval workflow) ----------
 def _next_pay_id() -> str:
     return f"PAY-{int(datetime.now().timestamp())}"
 
 def create_order(email: str, items: Dict[int,int], method: str, details: str) -> str:
-    if not items: raise ValueError("Cart is empty")
+    """
+    Creates an order with status 'Pending Approval'.
+    Payment record:
+      - 'Pending' for COD
+      - 'Success' for non-COD (simulated)
+    Stock is NOT reduced until approval.
+    """
+    if not items:
+        raise ValueError("Cart is empty")
+
     dfp = _load("products")
-    total = 0.0; rows = []
+    total = 0.0
+    rows = []
     for pid, qty in items.items():
         row = dfp[dfp["id"] == pid]
-        if row.empty: continue
+        if row.empty:
+            continue
         price = float(row.iloc[0]["price"])
         total += price * qty
         rows.append({"product_id": int(pid), "qty": int(qty), "price": price})
+
     order_id = f"ORD-{int(datetime.now().timestamp())}"
     pay_id = _next_pay_id()
     pay_status = "Pending" if method == "COD" else "Success"
 
+    # record payment intent
     p = _load("payments")
     p = pd.concat([p, pd.DataFrame([{
         "payment_id": pay_id, "order_id": order_id, "amount": total,
@@ -209,24 +272,38 @@ def create_order(email: str, items: Dict[int,int], method: str, details: str) ->
     }])], ignore_index=True)
     _save("payments", p)
 
+    # create order as Pending Approval (staff gate)
     o = _load("orders")
     o = pd.concat([o, pd.DataFrame([{
-        "order_id": order_id, "email": email, "status":"Paid" if pay_status=="Success" else "Pending",
-        "total": total, "payment_id": pay_id, "payment_method": method, "created_at": datetime.now()
+        "order_id": order_id, "email": email,
+        "status": "Pending Approval",
+        "total": total, "payment_id": pay_id,
+        "payment_method": method, "created_at": datetime.now()
     }])], ignore_index=True)
     _save("orders", o)
 
+    # store line items (do NOT decrement stock yet)
     oi = _load("order_items")
-    for r in rows: r["order_id"] = order_id
+    for r in rows:
+        r["order_id"] = order_id
     oi = pd.concat([oi, pd.DataFrame(rows)], ignore_index=True)
     _save("order_items", oi)
 
-    for r in rows: update_stock(r["product_id"], -r["qty"])
     return order_id
 
-def list_orders(email: Optional[str] = None) -> pd.DataFrame:
+def list_orders(email: Optional[str] = None, for_customer: bool = False) -> pd.DataFrame:
+    """
+    Staff view (for_customer=False): ALL orders (optional filter by email).
+    Customer view (for_customer=True): ONLY Approved orders for that email.
+    """
     o = _load("orders")
-    if email: o = o[o["email"] == email]
+    if for_customer:
+        if not email:
+            return o.iloc[0:0]
+        o = o[(o["email"] == email) & (o["status"] == "Approved")]
+    else:
+        if email:
+            o = o[o["email"] == email]
     return o.sort_values("created_at", ascending=False)
 
 def update_order_status(order_id: str, status: str):
@@ -237,21 +314,104 @@ def update_order_status(order_id: str, status: str):
     _save("orders", o)
     return True
 
-# ---------- Repairs ----------
-def create_repair(email: str, device: str, issue: str) -> str:
+def approve_order(order_id: str) -> bool:
+    """
+    Approving:
+      - sets order.status = 'Approved'
+      - decrements stock per order_items
+    """
+    if not update_order_status(order_id, "Approved"):
+        return False
+    oi = _load("order_items")
+    items = oi[oi["order_id"] == order_id]
+    for _, r in items.iterrows():
+        update_stock(int(r["product_id"]), -int(r["qty"]))
+    return True
+
+def decline_order(order_id: str) -> bool:
+    """
+    Declining:
+      - sets order.status = 'Declined'
+      - leaves stock unchanged
+    """
+    return update_order_status(order_id, "Declined")
+
+# ---------- Repairs (rich workflow) ----------
+def create_repair(email: str, device_type: str, device: str, issue: str,
+                  preferred_time: str, image_path: str) -> str:
+    """
+    Customer creates a repair ticket with optional photo and preferred visit time.
+    """
     t = f"R-{int(datetime.now().timestamp())}"
+    now = datetime.now()
     df = _load("repairs")
     df = pd.concat([df, pd.DataFrame([{
-        "ticket": t, "email": email, "device": device, "issue": issue,
-        "status": "In Progress", "created_at": datetime.now()
+        "ticket": t,
+        "email": email,
+        "device_type": device_type,
+        "device": device,
+        "issue": issue,
+        "image_path": image_path or "",
+        "preferred_time": preferred_time,
+        "scheduled_time": "",
+        "status": "In Progress",
+        "contacted": False,
+        "staff_notes": "",
+        "assigned_to": "",
+        "created_at": now,
+        "updated_at": now,
     }])], ignore_index=True)
     _save("repairs", df)
     return t
 
-def list_repairs(email: Optional[str] = None) -> pd.DataFrame:
+def list_repairs(email: Optional[str] = None, all_for_staff: bool = False) -> pd.DataFrame:
+    """
+    Customer view: only own tickets.
+    Staff view: all tickets.
+    """
     df = _load("repairs")
-    if email: df = df[df["email"] == email]
+    if not all_for_staff and email:
+        df = df[df["email"] == email]
     return df.sort_values("created_at", ascending=False)
+
+def update_repair_status(ticket: str, status: str) -> bool:
+    df = _load("repairs")
+    m = df["ticket"] == ticket
+    if not m.any(): return False
+    df.loc[m, "status"] = status
+    df.loc[m, "updated_at"] = datetime.now()
+    _save("repairs", df)
+    return True
+
+def schedule_repair_time(ticket: str, scheduled_time: str, staff_notes: str = "") -> bool:
+    df = _load("repairs")
+    m = df["ticket"] == ticket
+    if not m.any(): return False
+    df.loc[m, "scheduled_time"] = scheduled_time
+    if staff_notes:
+        prev = df.loc[m, "staff_notes"].astype(str).fillna("")
+        df.loc[m, "staff_notes"] = (prev + ("\n" if prev.iloc[0] else "") + staff_notes).str.strip()
+    df.loc[m, "updated_at"] = datetime.now()
+    _save("repairs", df)
+    return True
+
+def set_repair_contacted(ticket: str, contacted: bool) -> bool:
+    df = _load("repairs")
+    m = df["ticket"] == ticket
+    if not m.any(): return False
+    df.loc[m, "contacted"] = bool(contacted)
+    df.loc[m, "updated_at"] = datetime.now()
+    _save("repairs", df)
+    return True
+
+def assign_repair(ticket: str, staff_email: str) -> bool:
+    df = _load("repairs")
+    m = df["ticket"] == ticket
+    if not m.any(): return False
+    df.loc[m, "assigned_to"] = staff_email
+    df.loc[m, "updated_at"] = datetime.now()
+    _save("repairs", df)
+    return True
 
 # ---------- Sell device ----------
 def create_sell_request(email: str, device: str, brand: str, condition: str, exp_price: float, desc: str, image_path: str) -> str:
@@ -294,6 +454,7 @@ def convert_sell_request_to_product(req_id: str, price: float, stock:int=1, warr
         "desc": row.iloc[0]["desc"],
         "image_path": row.iloc[0]["image_path"],
         "created_by": created_by,
+        "featured": False,
     })
     update_sell_request(req_id, "Converted")
     return pid
